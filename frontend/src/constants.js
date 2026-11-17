@@ -2,6 +2,8 @@ export const ROLES={admin:'车间负责人',estimator:'工艺估价员',viewer:'
 export const STATES={draft:'待估算',calculating:'计算中',estimated:'已估工时',requested:'待机时承诺',committed:'已承诺锁定',failed:'计算失败'};
 export const STEELS=['P20','H13','S136'];
 
+export const VERSION_STATES={training:'训练中',pending_approval:'待批准',active:'现役',retired:'已退役',rejected:'已拒绝',failed:'训练失败'};
+
 export const EXECUTION_STATES={running:'试模进行中',completed:'已完工待结算',settled:'实绩已签结'};
 export const REVIEW_STATES={draft:'待主管复核',signed:'主管已签结'};
 

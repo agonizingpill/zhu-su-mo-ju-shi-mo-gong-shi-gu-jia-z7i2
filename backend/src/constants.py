@@ -2,6 +2,8 @@ ROLES = ('admin', 'estimator', 'viewer')
 ESTIMATE_STATES = ('draft', 'calculating', 'estimated', 'requested', 'committed', 'failed')
 STEELS = ('P20', 'H13', 'S136')
 
+MODEL_VERSION_STATES = ('training', 'pending_approval', 'active', 'retired', 'rejected', 'failed')
+
 EXECUTION_STATES = ('running', 'completed', 'settled')
 REVIEW_STATES = ('draft', 'signed')
 

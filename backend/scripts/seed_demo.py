@@ -4,7 +4,12 @@ from src.db import Base,engine,Session
 from src.models import User,Mould,MachineSlot,Estimate,TrialHistory
 from src.execution_models import TrialExecution,CostReview
 from src.workshop_models import MaintenanceWindow,ResinLot,TrialMaterial,ReviewMaterialLedger,TrialDelivery
+from src.governance_models import SealedBatch,ModelVersion,GovernanceState,GovernanceEvent,EstimateModelPin
+from src.governance_schemas import SealInput
+from src import governance_service as gov
 from src.auth import hash_password
+
+class SeedActor: email='seed'
 
 def seed():
     Base.metadata.create_all(engine)
@@ -34,6 +39,16 @@ def seed():
         for code,grade,qty,price,state in [('RS-P20-DEMO','ABS自然色',500,20,'available'),('RS-ISOLATED','ABS复检隔离',50,18,'quarantine')]:
             if not s.scalar(select(ResinLot).where(ResinLot.code==code)):
                 s.add(ResinLot(code=code,grade=grade,received_kg=qty,available_kg=qty,unit_price=price,state=state))
+        s.flush()
+        if not s.scalar(select(SealedBatch).where(SealedBatch.name=='SEAL-2026-11')):
+            ids=[r.id for r in s.scalars(select(TrialHistory).order_by(TrialHistory.id.desc()).limit(32))]
+            gov.seal_batch(s,SealInput(name='SEAL-2026-11',trial_ids=ids),SeedActor())
+            s.flush()
+        if not s.scalar(select(ModelVersion).where(ModelVersion.version_no=='V1')):
+            v=gov.create_candidate(s,SeedActor());s.flush()
+            gov.train_version(s,v.id)  # deterministic baseline: V1 waits for first-version approval in the UI
+            s.flush()
+        gov.governance(s)
         s.commit()
-        print({t.__tablename__:s.scalar(select(func.count()).select_from(t)) for t in (User,Mould,MachineSlot,Estimate,TrialHistory,TrialExecution,CostReview,MaintenanceWindow,ResinLot,TrialMaterial,ReviewMaterialLedger,TrialDelivery)})
+        print({t.__tablename__:s.scalar(select(func.count()).select_from(t)) for t in (User,Mould,MachineSlot,Estimate,TrialHistory,TrialExecution,CostReview,MaintenanceWindow,ResinLot,TrialMaterial,ReviewMaterialLedger,TrialDelivery,SealedBatch,ModelVersion,GovernanceEvent)})
 if __name__=='__main__':seed()

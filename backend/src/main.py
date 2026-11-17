@@ -1,5 +1,6 @@
 import os,logging
 from contextlib import asynccontextmanager
+from datetime import datetime,timezone
 import redis
 from fastapi import FastAPI,Depends,HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,11 +9,12 @@ from sqlalchemy import select,func
 from sqlalchemy.exc import IntegrityError
 from .db import Base,engine,db_session
 from .models import User,Mould,Estimate,MachineSlot,TrialHistory,Audit
+from .governance_models import GovernanceState,ModelVersion,EstimateModelPin
 from .auth import current,writers,admin,verify,token
 from .schemas import Login,MouldInput,EstimateInput,QuoteInput,SlotChoice,SlotInput
 from .services import item,serialize,record,require_edit,request_capacity,commit_capacity
 from .middlewares import RequestTrace,BurstGuard
-from .constants import ROLES,ESTIMATE_STATES,STEELS,EXECUTION_STATES,REVIEW_STATES,MAINTENANCE_STATES,RESIN_STATES,MATERIAL_STATES,DELIVERY_STATES
+from .constants import ROLES,ESTIMATE_STATES,STEELS,MODEL_VERSION_STATES,EXECUTION_STATES,REVIEW_STATES,MAINTENANCE_STATES,RESIN_STATES,MATERIAL_STATES,DELIVERY_STATES
 r=redis.Redis.from_url(os.environ['REDIS_URL'],decode_responses=True)
 @asynccontextmanager
 async def lifespan(app):
@@ -28,6 +30,8 @@ from .execution_routes import router as execution_router
 app.include_router(execution_router)
 from .workshop_routes import router as workshop_router
 app.include_router(workshop_router)
+from .governance_routes import router as governance_router
+app.include_router(governance_router)
 app.add_middleware(RequestTrace);app.add_middleware(BurstGuard)
 app.add_middleware(CORSMiddleware,allow_origins=['http://localhost:18222'],allow_methods=['*'],allow_headers=['*'])
 @app.exception_handler(IntegrityError)
@@ -43,7 +47,7 @@ def login(p:Login,s=Depends(db_session)):
 @app.get('/me')
 def me(u=Depends(current)):return {'email':u.email,'role':u.role}
 @app.get('/enums')
-def enums(u=Depends(current)):return {'roles':ROLES,'estimate_states':ESTIMATE_STATES,'steels':STEELS,'execution_states':EXECUTION_STATES,'review_states':REVIEW_STATES,'maintenance_states':MAINTENANCE_STATES,'resin_states':RESIN_STATES,'material_states':MATERIAL_STATES,'delivery_states':DELIVERY_STATES}
+def enums(u=Depends(current)):return {'roles':ROLES,'estimate_states':ESTIMATE_STATES,'steels':STEELS,'model_version_states':MODEL_VERSION_STATES,'execution_states':EXECUTION_STATES,'review_states':REVIEW_STATES,'maintenance_states':MAINTENANCE_STATES,'resin_states':RESIN_STATES,'material_states':MATERIAL_STATES,'delivery_states':DELIVERY_STATES}
 @app.get('/moulds')
 def moulds(s=Depends(db_session),u=Depends(current)):return [serialize(x) for x in s.scalars(select(Mould).order_by(Mould.id))]
 @app.post('/moulds')
@@ -57,9 +61,18 @@ def edit_mould(mid:int,p:MouldInput,s=Depends(db_session),u=Depends(writers)):
     # Historical model results must be invalidated when source specifications change.
     for e in s.scalars(select(Estimate).where(Estimate.mould_id==mid)):
         e.status='draft';e.predicted_hours=None;e.model_result=None;e.slot_id=None
+        pin=s.scalar(select(EstimateModelPin).where(EstimateModelPin.estimate_id==e.id))
+        if pin: s.delete(pin)
     record(s,u,'修订模具 '+m.code);s.commit();return serialize(m)
 @app.get('/estimates')
-def estimates(s=Depends(db_session),u=Depends(current)):return [serialize(x) for x in s.scalars(select(Estimate).order_by(Estimate.id.desc()))]
+def estimates(s=Depends(db_session),u=Depends(current)):
+    pins={p.estimate_id:p for p in s.scalars(select(EstimateModelPin))}
+    out=[]
+    for x in s.scalars(select(Estimate).order_by(Estimate.id.desc())):
+        d=serialize(x);p=pins.get(x.id)
+        d['model_version']=(x.model_result or {}).get('model_version') or (p.version_no if p else None)
+        out.append(d)
+    return out
 @app.post('/estimates')
 def add_estimate(p:EstimateInput,s=Depends(db_session),u=Depends(writers)):
     item(s,Mould,p.mould_id);e=Estimate(**p.model_dump());s.add(e);record(s,u,'建立估价 '+p.code);s.commit();return serialize(e)
@@ -72,7 +85,15 @@ def quote(eid:int,p:QuoteInput,s=Depends(db_session),u=Depends(writers)):
 def calculate(eid:int,s=Depends(db_session),u=Depends(writers)):
     e=item(s,Estimate,eid);require_edit(e)
     if e.status=='requested':raise HTTPException(409,'已申请机时，请先修改报价撤回申请')
-    e.status='calculating';e.predicted_hours=None;e.model_result=None;record(s,u,'估算入队 '+e.code);s.commit()
+    g=s.get(GovernanceState,1)
+    if not g or not g.active_version_id:raise HTTPException(409,'无现役模型版本，估算已阻断：请负责人在模型验收页批准版本上线')
+    v=s.get(ModelVersion,g.active_version_id)
+    if not v or not v.artifact:raise HTTPException(409,'现役模型版本缺少推理产物，估算已阻断')
+    e.status='calculating';e.predicted_hours=None;e.model_result=None
+    pin=s.scalar(select(EstimateModelPin).where(EstimateModelPin.estimate_id==eid))
+    if pin: s.delete(pin);s.flush()
+    s.add(EstimateModelPin(estimate_id=eid,version_id=v.id,version_no=v.version_no,pinned_at=datetime.now(timezone.utc).isoformat()))
+    record(s,u,f'估算入队 {e.code}（锁定 {v.version_no}）');s.commit()
     try:r.rpush('mould-estimates',e.id)
     except Exception:
         e.status='failed';s.commit();raise HTTPException(503,'计算队列暂不可用，请重试')
